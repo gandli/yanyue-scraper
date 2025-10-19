@@ -38,6 +38,20 @@ def preprocess_for_ocr(img_path: str):
     except Exception:
         return None
 
+# Normalize common OCR misreads in numeric text (letters mistaken for digits)
+DIGIT_MAP = str.maketrans({
+    "O": "0", "o": "0",
+    "I": "1", "l": "1",
+    "S": "8", "Z": "2",
+    "B": "8", "G": "6",
+})
+
+def normalize_ocr_digits(s: str) -> str:
+    try:
+        return s.translate(DIGIT_MAP)
+    except Exception:
+        return s
+
 # 传统烟:https://www.yanyue.cn/tobacco
 # 低温烟:https://www.yanyue.cn/hnb
 # 电子烟:https://www.yanyue.cn/e
@@ -309,19 +323,13 @@ def ocr_genpic(
             else:
                 with open(path, "rb") as f:
                     img_bytes = f.read()
-            # Prefer general OCR (supports Chinese + symbols); fallback to classification
-            out = reader.ocr(img_bytes)
-            if out:
-                raw = "".join([
-                    (item.get("text", "") if isinstance(item, dict) else str(item))
-                    for item in out
-                ]).strip()
-            else:
-                try:
-                    raw = reader.classification(img_bytes)
-                except Exception:
-                    raw = ""
+            # Use classification for single-line OCR
+            try:
+                raw = reader.classification(img_bytes)
+            except Exception:
+                raw = ""
             raw = raw.replace("￥", "¥")
+            raw = normalize_ocr_digits(raw)
             # Field-specific normalization: keep expected characters
             numeric_keys = {
                 "tar",
