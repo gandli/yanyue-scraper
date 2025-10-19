@@ -9,6 +9,35 @@ import csv
 import os
 import re
 
+# --- OCR engine (EasyOCR) initialization and preprocessing helpers ---
+EASYOCR_READER = None
+
+def get_easyocr_reader():
+    global EASYOCR_READER
+    if EASYOCR_READER is None:
+        try:
+            import easyocr
+            # Chinese Simplified + English support; CPU only
+            EASYOCR_READER = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+        except Exception:
+            EASYOCR_READER = None
+    return EASYOCR_READER
+
+
+def preprocess_for_ocr(img_path: str):
+    try:
+        from PIL import Image, ImageOps, ImageFilter
+        img = Image.open(img_path)
+        img = ImageOps.grayscale(img)
+        img = ImageOps.autocontrast(img)
+        w, h = img.size
+        if max(w, h) < 120:
+            img = img.resize((w * 2, h * 2), Image.LANCZOS)
+        img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+        return img
+    except Exception:
+        return None
+
 # 传统烟:https://www.yanyue.cn/tobacco
 # 低温烟:https://www.yanyue.cn/hnb
 # 电子烟:https://www.yanyue.cn/e
@@ -269,17 +298,40 @@ def ocr_genpic(
             path = ""
     text = ""
     try:
-        from PIL import Image, ImageOps, ImageFilter
-        import pytesseract
-
-        if path:
-            img = Image.open(path)
-            img = ImageOps.grayscale(img)
-            img = img.filter(ImageFilter.SHARPEN)
-            raw = pytesseract.image_to_string(
-                img, config="--psm 7 -c tessedit_char_whitelist=0123456789."
-            )
-            text = re.sub(r"[^0-9.]", "", (raw or ""))
+        reader = get_easyocr_reader()
+        if reader and path:
+            import numpy as np
+            img = preprocess_for_ocr(path)
+            if img is not None:
+                arr = np.array(img)
+                out = reader.readtext(arr, detail=0, paragraph=True)
+            else:
+                out = reader.readtext(path, detail=0, paragraph=True)
+            raw = "".join(out).strip() if out else ""
+            raw = raw.replace("￥", "¥")
+            # Field-specific normalization: keep expected characters
+            numeric_keys = {
+                "tar",
+                "nicotine",
+                "co",
+                "length",
+                "filter_length",
+                "circumference",
+                "per_pack_count",
+                "packs_per_carton",
+                "pack_price",
+                "carton_price",
+                "pack_barcode",
+                "条装条码",
+            }
+            if filename_prefix in {"pack_price", "carton_price"}:
+                text = re.sub(r"[^0-9.¥]", "", raw)
+            elif filename_prefix in {"pack_barcode", "条装条码"}:
+                text = re.sub(r"[^0-9]", "", raw)
+            elif filename_prefix in numeric_keys:
+                text = re.sub(r"[^0-9.]", "", raw)
+            else:
+                text = raw
     except Exception:
         text = ""
     return {"text": text, "path": path, "src": src}
