@@ -87,10 +87,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Ensure branch is up-to-date before committing
+          git fetch origin
+          git pull --rebase --autostash || true
           git add yanyue_tobacco_output yanyue_hnb_output yanyue_e_output || true
           if [[ -n "$(git status --porcelain)" ]]; then
             git commit -m "chore: update scraped outputs from CI [skip ci]"
-            git push
+            # Retry push on non-fast-forward by rebasing again
+            git push || (git pull --rebase --autostash && git push)
           else
             echo "No changes to commit"
           fi
