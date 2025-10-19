@@ -496,7 +496,7 @@ def main():
                 headers=("name", "href", "heat", "kouwei", "waiguan", "xingjiabi", "zonghe"),
             )
 
-    browser.close()
+        browser.close()
 
 
 if __name__ == "__main__":
