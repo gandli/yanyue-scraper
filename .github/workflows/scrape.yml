@@ -49,7 +49,11 @@ jobs:
         shell: bash
         run: |
           uv --version
-          uv sync --frozen
+          if [ -f uv.lock ]; then
+            uv sync --frozen
+          else
+            uv sync
+          fi
 
       - name: Install Playwright system dependencies and browsers
         uses: microsoft/playwright-github-action@v1
