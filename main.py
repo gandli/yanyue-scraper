@@ -9,19 +9,19 @@ import csv
 import os
 import re
 
-# --- OCR engine (EasyOCR) initialization and preprocessing helpers ---
-EASYOCR_READER = None
+# --- OCR engine (ddddocr) initialization and preprocessing helpers ---
+DDDDOCR_READER = None
 
-def get_easyocr_reader():
-    global EASYOCR_READER
-    if EASYOCR_READER is None:
+def get_ddddocr_reader():
+    global DDDDOCR_READER
+    if DDDDOCR_READER is None:
         try:
-            import easyocr
-            # Chinese Simplified + English support; CPU only
-            EASYOCR_READER = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+            import ddddocr
+            # Enable general OCR (supports Chinese and English), CPU only
+            DDDDOCR_READER = ddddocr.DdddOcr(ocr=True, show_ad=False)
         except Exception:
-            EASYOCR_READER = None
-    return EASYOCR_READER
+            DDDDOCR_READER = None
+    return DDDDOCR_READER
 
 
 def preprocess_for_ocr(img_path: str):
@@ -298,16 +298,29 @@ def ocr_genpic(
             path = ""
     text = ""
     try:
-        reader = get_easyocr_reader()
+        reader = get_ddddocr_reader()
         if reader and path:
-            import numpy as np
+            from io import BytesIO
             img = preprocess_for_ocr(path)
             if img is not None:
-                arr = np.array(img)
-                out = reader.readtext(arr, detail=0, paragraph=True)
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                img_bytes = buf.getvalue()
             else:
-                out = reader.readtext(path, detail=0, paragraph=True)
-            raw = "".join(out).strip() if out else ""
+                with open(path, "rb") as f:
+                    img_bytes = f.read()
+            # Prefer general OCR (supports Chinese + symbols); fallback to classification
+            out = reader.ocr(img_bytes)
+            if out:
+                raw = "".join([
+                    (item.get("text", "") if isinstance(item, dict) else str(item))
+                    for item in out
+                ]).strip()
+            else:
+                try:
+                    raw = reader.classification(img_bytes)
+                except Exception:
+                    raw = ""
             raw = raw.replace("￥", "¥")
             # Field-specific normalization: keep expected characters
             numeric_keys = {
@@ -330,6 +343,11 @@ def ocr_genpic(
                 text = re.sub(r"[^0-9]", "", raw)
             elif filename_prefix in numeric_keys:
                 text = re.sub(r"[^0-9.]", "", raw)
+                # normalize decimals like '.5' -> '0.5' and '1.' -> '1'
+                if text.startswith(".") and text[1:].isdigit():
+                    text = "0" + text
+                if text.endswith(".") and text[:-1].isdigit():
+                    text = text[:-1]
             else:
                 text = raw
     except Exception:

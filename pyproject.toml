@@ -5,7 +5,5 @@ description = "从烟悦网 https://www.yanyue.cn/ 爬取产品数据"
 requires-python = ">=3.10"
 dependencies = [
     "playwright>=1.55.0",
-    "pillow>=10.0.0",
-    "pytesseract>=0.3.10",
-    "easyocr>=1.7.1",
+    "ddddocr>=1.5.6",
 ]
