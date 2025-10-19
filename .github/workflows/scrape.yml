@@ -55,15 +55,13 @@ jobs:
             uv sync
           fi
 
-      - name: Install Playwright system dependencies and browsers
-        uses: microsoft/playwright-github-action@v1
-        with:
-          with-deps: true
-
-      - name: Install Chromium for Playwright (Python)
+      - name: Install Playwright dependencies and browsers (CLI)
         shell: bash
         run: |
-          uv run python -m playwright install chromium
+          # Install browsers via Python CLI (non-fatal if already installed)
+          uv run python -m playwright install chromium || true
+          # Install system dependencies: prefer Python CLI, fallback to Node CLI
+          uv run python -m playwright install-deps || npx --yes playwright install --with-deps chromium
 
       - name: Warm up ddddocr model cache
         shell: bash
