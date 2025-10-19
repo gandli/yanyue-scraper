@@ -15,7 +15,10 @@ import re
 
 BLOCKED_TYPES = {"image", "media", "font", "stylesheet"}
 CRAWL_DELAY_MS = 10000  # 10s
-YANYUE_USER_AGENT = "SeekportBot"  
+YANYUE_USER_AGENT = "SeekportBot"
+# YANYUE_LIMIT_BRANDS = 2
+# YANYUE_LIMIT_PRODUCT_PAGES = 2
+# YANYUE_LIMIT_DETAILS = 5
 
 
 def ensure_dir(dir_path: str):
@@ -29,6 +32,7 @@ TOBACCO_URL = f"{BASE_URL}/tobacco"
 HNB_URL = f"{BASE_URL}/hnb"
 E_URL = f"{BASE_URL}/e"
 ASHIMA_URL = f"{BASE_URL}/sort/14"
+
 
 def collect_anchors(
     page,
@@ -57,9 +61,11 @@ def collect_anchors(
                 continue
             if exclude_names and any(ex in name for ex in exclude_names):
                 continue
-            if href_prefix and not href.startswith(href_prefix):
-                continue
             full = urljoin(BASE_URL + "/", href)
+            if href_prefix:
+                prefix_full = urljoin(BASE_URL + "/", href_prefix.lstrip("/"))
+                if not full.startswith(prefix_full):
+                    continue
             key = (name, full)
             if key in seen:
                 continue
@@ -200,26 +206,113 @@ def save_brands(brands, json_path: str, csv_path: str, headers=("name", "href", 
             writer.writerow([b.get(h, "") for h in headers])
 
 
-def navigate_and_wait(
-    page, url: str, content_selector: str | None = None, timeout_ms: int = 60000
-):
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+def load_json_if_exists(path: str):
+    if os.path.exists(path):
         try:
-            page.wait_for_selector("text=内容加载中", timeout=2000)
-            page.wait_for_selector("text=内容加载中", state="hidden", timeout=10000)
-        except PlaywrightTimeoutError:
-            page.wait_for_timeout(500)
-        if content_selector:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or []
+        except Exception:
+            return []
+    return []
+
+
+def append_ndjson(file_path: str, obj: dict):
+    try:
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def append_csv_row(file_path: str, headers: tuple, row_dict: dict):
+    need_header = not os.path.exists(file_path) or os.path.getsize(file_path) == 0
+    with open(file_path, "a", newline="", encoding="utf-8") as cf:
+        writer = csv.writer(cf)
+        if need_header:
+            writer.writerow(list(headers))
+        writer.writerow([row_dict.get(h, "") for h in headers])
+
+
+def load_ndjson_hrefs(path: str) -> set:
+    hrefs = set()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line.strip())
+                        href = obj.get("href")
+                        if href:
+                            hrefs.add(href)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    return hrefs
+
+
+def ocr_genpic(
+    img_locator, save_dir: str | None, filename_prefix: str, idx: int
+) -> dict:
+    path = ""
+    src = ""
+    try:
+        src = img_locator.get_attribute("src") or ""
+    except PlaywrightError:
+        src = ""
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        try:
+            path = os.path.join(save_dir, f"{filename_prefix}_{idx}.png")
+            img_locator.screenshot(path=path)
+        except PlaywrightError:
+            path = ""
+    text = ""
+    try:
+        from PIL import Image, ImageOps, ImageFilter
+        import pytesseract
+
+        if path:
+            img = Image.open(path)
+            img = ImageOps.grayscale(img)
+            img = img.filter(ImageFilter.SHARPEN)
+            raw = pytesseract.image_to_string(
+                img, config="--psm 7 -c tessedit_char_whitelist=0123456789."
+            )
+            text = re.sub(r"[^0-9.]", "", (raw or ""))
+    except Exception:
+        text = ""
+    return {"text": text, "path": path, "src": src}
+
+
+def navigate_and_wait(
+    page,
+    url: str,
+    content_selector: str | None = None,
+    timeout_ms: int = 60000,
+    retries: int = 0,
+):
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             try:
-                page.wait_for_selector(content_selector, timeout=10000)
+                page.wait_for_selector("text=内容加载中", timeout=2000)
+                page.wait_for_selector("text=内容加载中", state="hidden", timeout=10000)
             except PlaywrightTimeoutError:
-                pass
-        # 统一在每次导航后等待 5s，遵守 robots.txt 的 Crawl-delay
-        page.wait_for_timeout(CRAWL_DELAY_MS)
-        return True
-    except (PlaywrightTimeoutError, PlaywrightError):
-        return False
+                page.wait_for_timeout(500)
+            if content_selector:
+                try:
+                    page.wait_for_selector(content_selector, timeout=10000)
+                except PlaywrightTimeoutError:
+                    pass
+            # 每次导航后统一等待 Crawl-delay
+            page.wait_for_timeout(CRAWL_DELAY_MS)
+            return True
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            last_err = e
+            page.wait_for_timeout(1000)
+    return False
 
 
 def scrape_brand_products(page, brand_url: str, max_pages: int = 100):
@@ -262,7 +355,9 @@ def scrape_brand_products(page, brand_url: str, max_pages: int = 100):
                 continue
         return False
 
-    navigate_and_wait(page, brand_url, content_selector="#prowrap")
+    # 仅在当前不在目标品牌页时才导航，避免重复等待
+    if page.url != brand_url:
+        navigate_and_wait(page, brand_url, content_selector="#prowrap", retries=1)
 
     for _ in range(max_pages):
         collect_current_page()
@@ -272,7 +367,7 @@ def scrape_brand_products(page, brand_url: str, max_pages: int = 100):
     return results
 
 
-def scrape_product_detail(page) -> dict:
+def scrape_product_detail(page, img_save_dir: str | None = None) -> dict:
     details = {
         "name": "",
         "href": page.url,
@@ -315,13 +410,12 @@ def scrape_product_detail(page) -> dict:
             except PlaywrightError:
                 details["name"] = ""
 
-        # 热度
+        # 热度与评分
         if details_text:
             m = re.search(r"热度[:：]\s*(\d+)", details_text)
             if m:
                 details["heat"] = m.group(1)
 
-            # 分数提取（兼容空格/全角空格）
             def find_score(label_regex):
                 m = re.search(
                     label_regex + r"[:：]\s*([0-9]+(?:\.[0-9]+)?)\s*分", details_text
@@ -332,6 +426,65 @@ def scrape_product_detail(page) -> dict:
             details["waiguan"] = find_score(r"外\s*观")
             details["xingjiabi"] = find_score(r"性\s*价\s*比")
             details["zonghe"] = find_score(r"综\s*合")
+
+        # 解析 ul.ul_1 属性对（支持 genpic 图片数字）
+        try:
+            ul = page.locator("#product_detail ul.ul_1")
+            if ul.count() > 0:
+                lis = ul.locator("li")
+                lc = lis.count()
+                title_map = {
+                    "品牌": "brand",
+                    "类型": "type",
+                    "焦油": "tar",
+                    "烟碱": "nicotine",
+                    "一氧化碳": "co",
+                    "长度": "length",
+                    "过滤嘴长": "filter_length",
+                    "周长": "circumference",
+                    "包装形式": "packaging",
+                    "主颜色": "main_color",
+                    "副颜色": "sub_color",
+                    "每盒数量": "per_pack_count",
+                    "条装盒数": "packs_per_carton",
+                    "小盒价格": "pack_price",
+                    "条装价格": "carton_price",
+                    "小盒条码": "pack_barcode",
+                }
+                for i in range(lc):
+                    try:
+                        li = lis.nth(i)
+                        cls = li.get_attribute("class") or ""
+                        if "info_title" in cls:
+                            title = ((li.inner_text() or "").strip()).rstrip(":：")
+                            key = title_map.get(title, title)
+                            # 下一个 sibling 作为内容
+                            if i + 1 < lc:
+                                content_li = lis.nth(i + 1)
+                                val_text = (content_li.inner_text() or "").strip()
+                                imgs = content_li.locator("img.genpic")
+                                ocr_val = ""
+                                if imgs.count() > 0:
+                                    parts = []
+                                    save_dir = (
+                                        os.path.join(img_save_dir or "", "genpic")
+                                        if img_save_dir
+                                        else None
+                                    )
+                                    for j in range(imgs.count()):
+                                        r = ocr_genpic(
+                                            imgs.nth(j), save_dir, f"{key}", j + 1
+                                        )
+                                        if r.get("text"):
+                                            parts.append(r["text"])
+                                    if parts:
+                                        ocr_val = "".join(parts)
+                                value = ocr_val or val_text
+                                details[key] = value
+                    except PlaywrightError:
+                        continue
+        except PlaywrightError:
+            pass
 
         # 原始文本备份（仅 JSON 输出，不写入 CSV）
         details["detail_text"] = details_text or ""
@@ -367,26 +520,9 @@ def main():
     ]
 
     with sync_playwright() as p:
-        # 读取 UA 与 Crawl-delay 配置
-        ua_env = os.getenv("YANYUE_USER_AGENT", "").strip()
-        default_ua = (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/119.0.0.0 Safari/537.36"
-        )
-        chosen_ua = ua_env if ua_env else default_ua
-
-        # 根据 UA 或环境变量动态设置 Crawl-delay
-        global CRAWL_DELAY_MS
-        crawl_delay_env = os.getenv("YANYUE_CRAWL_DELAY_MS", "").strip()
-        try:
-            CRAWL_DELAY_MS = (
-                int(crawl_delay_env)
-                if crawl_delay_env
-                else (10000 if "seekportbot" in chosen_ua.lower() else 5000)
-            )
-        except ValueError:
-            CRAWL_DELAY_MS = 10000 if "seekportbot" in chosen_ua.lower() else 5000
+        # 使用常量 UA 与 Crawl-delay 配置
+        chosen_ua = YANYUE_USER_AGENT
+        # 使用常量 CRAWL_DELAY_MS=10000（10s）
 
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -403,17 +539,30 @@ def main():
             pass
 
         def route_handler(route, request):
-            rt = request.resource_type
-            if rt in BLOCKED_TYPES and not (rt == "stylesheet"):
-                route.abort()
-            else:
+            try:
+                rt = request.resource_type
+                url = request.url or ""
+                # 放行 genpic 反爬数字图片，其它图片仍阻断
+                if rt == "image":
+                    if "genpic" in url:
+                        route.continue_()
+                    else:
+                        route.abort()
+                    return
+                if rt in BLOCKED_TYPES and not (rt == "stylesheet"):
+                    route.abort()
+                else:
+                    route.continue_()
+            except PlaywrightError:
                 route.continue_()
 
         page.route("**/*", route_handler)
 
         for t in targets:
             ensure_dir(t["output_dir"])
-            ok = navigate_and_wait(page, t["url"])  # 每次导航后统一 Crawl-delay
+            ok = navigate_and_wait(
+                page, t["url"], retries=1
+            )  # 每次导航后统一 Crawl-delay
             if not ok:
                 print(f"导航异常: 无法进入 {t['url']}。继续抓取当前页面状态。")
 
@@ -428,61 +577,137 @@ def main():
             )
 
         # --- 抓取所有传统烟品牌的产品与详情 ---
-        ok = navigate_and_wait(page, TOBACCO_URL)
-        if not ok:
-            print("[tobacco] 导航失败，仍尝试从当前页面抓取品牌。")
-        tobacco_brands = scrape_tobacco_brands(page)
-        print(f"[tobacco] 需要抓取的品牌数: {len(tobacco_brands)}")
+        brands_json_path = os.path.join("yanyue_tobacco_output", "brands_tobacco.json")
+        tobacco_brands = load_json_if_exists(brands_json_path)
+        if tobacco_brands:
+            print(f"[tobacco] 复用已有品牌列表: {len(tobacco_brands)}")
+        else:
+            ok = navigate_and_wait(page, TOBACCO_URL, retries=1)
+            if not ok:
+                print("[tobacco] 导航失败，仍尝试从当前页面抓取品牌。")
+            tobacco_brands = scrape_tobacco_brands(page)
+            print(f"[tobacco] 需要抓取的品牌数: {len(tobacco_brands)}")
 
         products_max_pages_env = os.getenv("YANYUE_LIMIT_PRODUCT_PAGES", "")
         try:
-            products_max_pages = int(products_max_pages_env) if products_max_pages_env.strip() else 100
+            products_max_pages = (
+                int(products_max_pages_env) if products_max_pages_env.strip() else 100
+            )
         except ValueError:
             products_max_pages = 100
 
         limit_details_env = os.getenv("YANYUE_LIMIT_DETAILS", "")
         try:
-            limit_details = int(limit_details_env) if limit_details_env.strip() else None
+            limit_details = (
+                int(limit_details_env) if limit_details_env.strip() else None
+            )
         except ValueError:
             limit_details = None
 
-        for b in tobacco_brands:
+        # 限制品牌数量以便快速验证（可选）
+        limit_brands_env = os.getenv("YANYUE_LIMIT_BRANDS", "")
+        try:
+            limit_brands = int(limit_brands_env) if limit_brands_env.strip() else None
+        except ValueError:
+            limit_brands = None
+        if limit_brands is not None:
+            tobacco_brands = tobacco_brands[:limit_brands]
+            print(f"[tobacco] 将处理前 {limit_brands} 个品牌")
+
+        total_brands = len(tobacco_brands)
+        for i, b in enumerate(tobacco_brands, 1):
             href = b.get("href") or ""
             name = b.get("name") or "unknown"
-            if not href.startswith("/sort/"):
-                continue
             m = re.search(r"/sort/(\d+)", href)
-            brand_id = m.group(1) if m else "unknown"
-            brand_url = urljoin(BASE_URL, href)
+            if not m:
+                continue
+            brand_id = m.group(1)
+            brand_url = href if href.startswith("http") else urljoin(BASE_URL, href)
             brand_dir = os.path.join("yanyue_tobacco_output", f"sort_{brand_id}")
             ensure_dir(brand_dir)
 
-            print(f"[brand:{brand_id}] 进入品牌页: {name} -> {brand_url}")
-            navigate_and_wait(page, brand_url, content_selector="#prowrap")
-            page.screenshot(path=os.path.join(brand_dir, f"brand_sort_{brand_id}.png"), full_page=True)
+            print(
+                f"[brand {i}/{total_brands} id:{brand_id}] 进入品牌页: {name} -> {brand_url}"
+            )
+            navigate_and_wait(page, brand_url, content_selector="#prowrap", retries=1)
+            page.screenshot(
+                path=os.path.join(brand_dir, f"brand_sort_{brand_id}.png"),
+                full_page=True,
+            )
 
-            products = scrape_brand_products(page, brand_url, max_pages=products_max_pages)
-            print(f"[brand:{brand_id}] 产品列表数量: {len(products)}")
+            products_json_path = os.path.join(
+                brand_dir, f"sort_{brand_id}_products.json"
+            )
+            products_csv_path = os.path.join(brand_dir, f"sort_{brand_id}_products.csv")
+            products = load_json_if_exists(products_json_path)
+            if products:
+                print(f"[brand:{brand_id}] 复用已存在产品列表: {len(products)}")
+            else:
+                products = scrape_brand_products(
+                    page, brand_url, max_pages=products_max_pages
+                )
+                print(f"[brand:{brand_id}] 产品列表数量: {len(products)}")
+            # 确保产品列表持久化（复用时也生成CSV）
             save_brands(
                 products,
-                os.path.join(brand_dir, f"sort_{brand_id}_products.json"),
-                os.path.join(brand_dir, f"sort_{brand_id}_products.csv"),
+                products_json_path,
+                products_csv_path,
                 headers=("name", "href"),
             )
 
             details = []
+            details_stream_ndjson_path = os.path.join(
+                brand_dir, f"sort_{brand_id}_details_stream.ndjson"
+            )
+            details_stream_csv_path = os.path.join(
+                brand_dir, f"sort_{brand_id}_details_stream.csv"
+            )
+            seen_detail_hrefs = load_ndjson_hrefs(details_stream_ndjson_path)
+            detail_headers = (
+                "name",
+                "href",
+                "heat",
+                "kouwei",
+                "waiguan",
+                "xingjiabi",
+                "zonghe",
+                "type",
+                "tar",
+                "nicotine",
+                "co",
+                "length",
+                "filter_length",
+                "circumference",
+                "packaging",
+                "main_color",
+                "sub_color",
+                "per_pack_count",
+                "packs_per_carton",
+                "pack_price",
+                "carton_price",
+                "pack_barcode",
+            )
             for idx, p in enumerate(products):
                 if limit_details is not None and idx >= limit_details:
                     break
                 url = p.get("href")
                 if not url:
                     continue
-                ok2 = navigate_and_wait(page, url, content_selector="#product_detail")
+                if url in seen_detail_hrefs:
+                    print(f"[detail:{brand_id}] 已存在，跳过: {url}")
+                    continue
+                print(f"[detail:{brand_id}] ({idx + 1}/{len(products)}) 进入: {url}")
+                ok2 = navigate_and_wait(
+                    page, url, content_selector="#product_detail", retries=2
+                )
                 if not ok2:
                     print(f"[detail:{brand_id}] 跳过无法进入的产品页: {url}")
                     continue
-                d = scrape_product_detail(page)
+                d = scrape_product_detail(page, img_save_dir=brand_dir)
                 details.append(d)
+                append_ndjson(details_stream_ndjson_path, d)
+                append_csv_row(details_stream_csv_path, detail_headers, d)
+                seen_detail_hrefs.add(url)
                 if idx < 3:
                     page.screenshot(
                         path=os.path.join(brand_dir, f"product_{idx + 1}.png"),
@@ -493,7 +718,7 @@ def main():
                 details,
                 os.path.join(brand_dir, f"sort_{brand_id}_details.json"),
                 os.path.join(brand_dir, f"sort_{brand_id}_details.csv"),
-                headers=("name", "href", "heat", "kouwei", "waiguan", "xingjiabi", "zonghe"),
+                headers=detail_headers,
             )
 
         browser.close()
