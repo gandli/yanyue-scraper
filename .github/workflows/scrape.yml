@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       limit_brands:
-        description: "限制抓取品牌数量 (默认 2)"
+        description: "限制抓取品牌数量 (默认 全量)"
         required: false
-        default: "2"
+        default: ""
       limit_product_pages:
-        description: "每品牌限制产品页数量 (默认 2)"
+        description: "每品牌限制产品页数量 (默认 全量)"
         required: false
-        default: "2"
+        default: ""
       limit_details:
-        description: "每品牌限制详情数量 (默认 5)"
+        description: "每品牌限制详情数量 (默认 全量)"
         required: false
-        default: "5"
+        default: ""
 
 jobs:
   scrape:
@@ -75,9 +75,9 @@ jobs:
       - name: Run scraper (main.py)
         shell: bash
         env:
-          YANYUE_LIMIT_BRANDS: ${{ github.event.inputs.limit_brands || '2' }}
-          YANYUE_LIMIT_PRODUCT_PAGES: ${{ github.event.inputs.limit_product_pages || '2' }}
-          YANYUE_LIMIT_DETAILS: ${{ github.event.inputs.limit_details || '5' }}
+          YANYUE_LIMIT_BRANDS: ${{ github.event.inputs.limit_brands }}
+          YANYUE_LIMIT_PRODUCT_PAGES: ${{ github.event.inputs.limit_product_pages }}
+          YANYUE_LIMIT_DETAILS: ${{ github.event.inputs.limit_details }}
           YANYUE_DELAY_MS: "20000"
           YANYUE_DELAY_JITTER_MS: "5000"
           YANYUE_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
