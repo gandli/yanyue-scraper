@@ -78,6 +78,9 @@ jobs:
           YANYUE_LIMIT_BRANDS: ${{ github.event.inputs.limit_brands || '2' }}
           YANYUE_LIMIT_PRODUCT_PAGES: ${{ github.event.inputs.limit_product_pages || '2' }}
           YANYUE_LIMIT_DETAILS: ${{ github.event.inputs.limit_details || '5' }}
+          YANYUE_DELAY_MS: "20000"
+          YANYUE_DELAY_JITTER_MS: "5000"
+          YANYUE_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         run: |
           uv run python main.py
 

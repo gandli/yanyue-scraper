@@ -8,6 +8,7 @@ import json
 import csv
 import os
 import re
+import random
 
 # --- OCR engine (ddddocr) initialization and preprocessing helpers ---
 DDDDOCR_READER = None
@@ -57,8 +58,9 @@ def normalize_ocr_digits(s: str) -> str:
 # 电子烟:https://www.yanyue.cn/e
 
 BLOCKED_TYPES = {"image", "media", "font", "stylesheet"}
-CRAWL_DELAY_MS = 10000  # 10s
-YANYUE_USER_AGENT = "SeekportBot"
+CRAWL_DELAY_MS = int(os.getenv("YANYUE_DELAY_MS", "15000"))
+DELAY_JITTER_MS = int(os.getenv("YANYUE_DELAY_JITTER_MS", "5000"))
+YANYUE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 # YANYUE_LIMIT_BRANDS = 2
 # YANYUE_LIMIT_PRODUCT_PAGES = 2
 # YANYUE_LIMIT_DETAILS = 5
@@ -384,12 +386,14 @@ def navigate_and_wait(
                     page.wait_for_selector(content_selector, timeout=10000)
                 except PlaywrightTimeoutError:
                     pass
-            # 每次导航后统一等待 Crawl-delay
-            page.wait_for_timeout(CRAWL_DELAY_MS)
+            # 遵守 Crawl-delay + 随机抖动，降低被动防
+            page.wait_for_timeout(CRAWL_DELAY_MS + random.randint(0, DELAY_JITTER_MS))
             return True
         except (PlaywrightTimeoutError, PlaywrightError) as e:
             last_err = e
-            page.wait_for_timeout(1000)
+            # 渐进退避 + 抖动
+            backoff = 1000 * (attempt + 1)
+            page.wait_for_timeout(backoff + random.randint(0, DELAY_JITTER_MS))
     return False
 
 
@@ -426,8 +430,8 @@ def scrape_brand_products(page, brand_url: str, max_pages: int = 100):
                     if next_a.is_visible():
                         next_a.click(timeout=5000)
                         page.wait_for_load_state("domcontentloaded")
-                        # 分页导航后等待 5s，遵守 Crawl-delay
-                        page.wait_for_timeout(CRAWL_DELAY_MS)
+                        # 分页导航后等待 Crawl-delay + 随机抖动
+                        page.wait_for_timeout(CRAWL_DELAY_MS + random.randint(0, DELAY_JITTER_MS))
                         return True
             except PlaywrightError:
                 continue
@@ -572,6 +576,20 @@ def scrape_product_detail(page, img_save_dir: str | None = None) -> dict:
     return details
 
 
+def apply_stealth(page):
+    try:
+        page.add_init_script(
+            """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = window.chrome || { runtime: {} };
+Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+"""
+        )
+    except PlaywrightError:
+        pass
+
+
 def main():
     targets = [
         {
@@ -599,15 +617,18 @@ def main():
 
     with sync_playwright() as p:
         # 使用常量 UA 与 Crawl-delay 配置
-        chosen_ua = YANYUE_USER_AGENT
-        # 使用常量 CRAWL_DELAY_MS=10000（10s）
+        chosen_ua = os.getenv("YANYUE_USER_AGENT", YANYUE_USER_AGENT)
+        # 使用环境可覆盖的 Crawl-delay 与随机抖动
 
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=chosen_ua,
             viewport={"width": 1280, "height": 800},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
         )
         page = context.new_page()
+        apply_stealth(page)
         page.set_default_timeout(60000)
 
         # 统一允许样式，其它非文本资源继续阻断
@@ -786,6 +807,8 @@ def main():
                 append_ndjson(details_stream_ndjson_path, d)
                 append_csv_row(details_stream_csv_path, detail_headers, d)
                 seen_detail_hrefs.add(url)
+                # 每个详情后增加人类化等待（Crawl-delay + 抖动）
+                page.wait_for_timeout(CRAWL_DELAY_MS + random.randint(0, DELAY_JITTER_MS))
                 if idx < 3:
                     page.screenshot(
                         path=os.path.join(brand_dir, f"product_{idx + 1}.png"),
